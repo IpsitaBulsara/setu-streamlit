@@ -30,6 +30,7 @@ st.set_page_config(page_title="SETU — Functional Prototype", layout="wide", pa
 # ---------------------------------------------------------------------------
 GOLD = "#C57A1B"
 PURPLE = "#4B2E83"
+PURPLE_TEXT = "#33205E"  # darker purple, used only for text-on-light so contrast stays >=5:1
 GREEN = "#2F7A54"
 RED = "#B23A2E"
 CREAM = "#3E2817"     # ink/text on the warm background
@@ -47,11 +48,11 @@ st.markdown(f"""
     .stApp {{ background-color: {BG}; }}
     h1, h2, h3 {{ color: {INK}; }}
     p, label, .stMarkdown {{ color: {CREAM}; }}
-    .setu-tag {{ font-family: monospace; color: #6b4a1f; font-size: 13px; margin-top: -12px; }}
+    .setu-tag {{ font-family: monospace; color: {CREAM}; font-size: 13px; margin-top: -12px; }}
     .pill {{
         display:inline-block; font-family: monospace; font-size: 11px; letter-spacing:0.06em;
-        color: {PURPLE}; border: 1px solid {PURPLE}; border-radius: 20px; padding: 3px 11px;
-        background: rgba(75,46,131,0.06);
+        color: {PURPLE_TEXT}; border: 1px solid {PURPLE}; border-radius: 20px; padding: 3px 11px;
+        background: {PANEL};
     }}
     .signal-buy {{ background: rgba(47,122,84,0.14); color:{GREEN}; border:1px solid {GREEN};
         padding:8px 16px; border-radius:3px; font-weight:700; display:inline-block; font-family:monospace;}}
@@ -62,17 +63,18 @@ st.markdown(f"""
     .wh-card {{ background:{PANEL}; border:1px solid {LINE}; border-radius:4px; padding:14px; border-top:3px solid {LINE};}}
     .wh-ok {{ border-top-color: {GREEN}; }}
     .wh-alert {{ border-top-color: {RED}; }}
+    .wh-card .wh-sub {{ color: {CREAM}; }}
+    .log-box {{ background:{LOG_BG}; border-radius:4px; padding:10px 4px; max-height:260px; overflow-y:auto; }}
     .log-line {{ font-family: monospace; font-size: 12.5px; padding: 4px 0 4px 10px; border-left:2px solid {LOG_MUTED}; margin-bottom:2px;}}
     .log-alert {{ border-left-color: #e2867a; color:#f1b3ae; }}
     .log-resolve {{ border-left-color: #7fd1a8; color:#bfe9d5; }}
     .log-info {{ border-left-color: {LOG_MUTED}; color:{LOG_TEXT}; }}
-    [data-testid="stMetricValue"] {{ color: {PURPLE}; }}
-    [data-testid="stMetricLabel"] {{ color: {MUTED}; }}
+    [data-testid="stMetricValue"] {{ color: {PURPLE_TEXT}; }}
+    [data-testid="stMetricLabel"] {{ color: {CREAM}; }}
     .stTabs [data-baseweb="tab"] {{ color: {CREAM}; }}
-    .stTabs [aria-selected="true"] {{ color: {PURPLE}; font-weight:600; }}
+    .stTabs [aria-selected="true"] {{ color: {PURPLE_TEXT}; font-weight:600; }}
     .stButton button {{ background-color: {PURPLE}; color: {PANEL}; border: none; }}
     .stButton button:hover {{ background-color: {PURPLE}; opacity:0.88; color:{PANEL}; }}
-    div[data-testid="stContainer"] {{ background-color: {LOG_BG}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -91,7 +93,7 @@ def base_layout(title):
     return dict(
         title=dict(text=title, font=dict(color=INK, size=14)),
         paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-        font=dict(color=MUTED), legend=dict(font=dict(color=CREAM)),
+        font=dict(color=CREAM), legend=dict(font=dict(color=CREAM)),
         xaxis=dict(gridcolor=LINE), yaxis=dict(gridcolor=LINE),
         margin=dict(t=40, l=40, r=20, b=30),
     )
@@ -493,10 +495,10 @@ with tab3:
         with col:
             st.markdown(f"""
             <div class="wh-card {'wh-alert' if alert else 'wh-ok'}">
-                <div style="font-size:13px;font-weight:600;">{w['label']}</div>
-                <div style="font-family:monospace;font-size:22px;font-weight:700;">{cover:.1f} <span style="font-size:12px;color:{MUTED}">d</span></div>
-                <div style="font-size:11px;color:{MUTED};">days of cover</div>
-                <div style="font-size:11px;color:{MUTED};font-family:monospace;margin-top:8px;">{w['stock']:.0f} units · demand {w['demand']:.0f}/day</div>
+                <div style="font-size:13px;font-weight:600;" class="wh-sub">{w['label']}</div>
+                <div style="font-family:monospace;font-size:22px;font-weight:700;" class="wh-sub">{cover:.1f} <span style="font-size:12px;" class="wh-sub">d</span></div>
+                <div style="font-size:11px;" class="wh-sub">days of cover</div>
+                <div style="font-size:11px;font-family:monospace;margin-top:8px;" class="wh-sub">{w['stock']:.0f} units · demand {w['demand']:.0f}/day</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -515,20 +517,20 @@ with tab3:
     render_tower_chart()
 
     st.markdown("##### Event log")
-    log_ph = st.container(height=260)
+    log_ph = st.empty()
     def render_log():
-        with log_ph:
-            for kind, msg in st.session_state.log[:60]:
-                cls = {"alert": "log-alert", "resolve": "log-resolve", "info": "log-info"}[kind]
-                st.markdown(f'<div class="log-line {cls}">{msg}</div>', unsafe_allow_html=True)
+        lines = []
+        for kind, msg in st.session_state.log[:60]:
+            cls = {"alert": "log-alert", "resolve": "log-resolve", "info": "log-info"}[kind]
+            lines.append(f'<div class="log-line {cls}">{msg}</div>')
+        log_ph.markdown(f'<div class="log-box">{"".join(lines)}</div>', unsafe_allow_html=True)
     render_log()
 
     if autorun:
         for _ in range(12):
             sim_tick()
             render_tower_chart()
-            with log_ph:
-                st.empty()
+            render_log()
             time.sleep(0.5)
         st.rerun()
 
