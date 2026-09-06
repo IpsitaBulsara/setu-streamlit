@@ -80,7 +80,9 @@ st.title("SETU\u200a·\u200a functional prototype")
 st.markdown('<div class="setu-tag">Unify · Sense · Simulate · Act — Team Alucard, Maestros 2026</div>', unsafe_allow_html=True)
 st.write("")
 
-tab1, tab2, tab3 = st.tabs(["📈 Demand Sensing", "💰 Should-Cost", "🗼 Control Tower & Agent"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📈 Demand Sensing", "💰 Should-Cost", "🗼 Control Tower & Agent", "🤝 Supplier Risk Agent"
+])
 
 # ---------------------------------------------------------------------------
 # SHARED PLOT LAYOUT
@@ -189,7 +191,7 @@ with tab1:
         st.plotly_chart(fig2, use_container_width=True)
 
 # ===========================================================================
-# MODULE 2 — SHOULD-COST MODELLING  (real Yahoo Finance data, synthetic fallback)
+# MODULE 2 — SHOULD-COST MODELLING  (procurement cost drivers, synthetic fallback)
 # ===========================================================================
 YF_TICKERS = {"cocoa": "CC=F", "dairy": "DC=F", "fx": "INR=X"}
 YF_NAMES = {"cocoa": "Cocoa futures (ICE, CC=F)", "dairy": "Class III milk futures (CME, DC=F)", "fx": "USD/INR (INR=X)"}
@@ -204,7 +206,7 @@ def gen_price_series(seed, days, start, mean_level, revert_speed, vol):
         p[d] = max(1.0, p[d-1] + revert_speed*(mean_level - p[d-1]) + p[d-1]*shock)
     return p
 
-@st.cache_data(ttl=900, show_spinner="Pulling cocoa, milk and INR/USD prices from Yahoo Finance…")
+@st.cache_data(ttl=900, show_spinner="Refreshing procurement cost drivers for cocoa, dairy and FX…")
 def fetch_yahoo_prices(nonce, period="9mo"):
     """Fetch real daily closes for cocoa, milk (dairy proxy) and USD/INR from Yahoo Finance.
     Raises on failure so the caller can fall back to synthetic data."""
@@ -298,18 +300,19 @@ def run_cost_module(nonce):
 with tab2:
     c1, c2 = st.columns([1, 2.2])
     with c1:
-        st.markdown("##### Market data")
-        st.write("Pulls real daily closes for cocoa futures, Class III milk futures (a dairy proxy — India doesn't "
-                 "have a liquid public dairy futures contract) and USD/INR from Yahoo Finance, blends them by "
-                 "materials mix, and reads trend + z-score for a live buy/wait signal. Falls back to a synthetic "
-                 "series automatically if Yahoo Finance can't be reached.")
+        st.markdown("##### Procurement cost drivers")
+        st.write("Uses public cocoa, dairy-proxy and USD/INR reference prices as inputs to a raw-materials "
+             "should-cost index. It is not a trading signal: it helps procurement time committed buying, "
+             "hedging discussions and supplier quote reviews. Synthetic reference series are used if live "
+             "sources are unavailable.")
         if "cost_nonce" not in st.session_state:
             st.session_state.cost_nonce = 0
-        refresh_cost = st.button("🔁 Refresh market data", use_container_width=True, key="regen_cost")
+        refresh_cost = st.button("🔁 Refresh cost drivers", use_container_width=True, key="regen_cost")
         if refresh_cost:
             st.session_state.cost_nonce += 1
         result = run_cost_module(st.session_state.cost_nonce)
         fig, signal, cls, rationale, current, trailing_avg, delta_pct, slope, z, is_live, source_note = result
+        st.session_state.procurement_cost_signal = signal
 
         if is_live:
             st.success(source_note, icon="📡")
@@ -323,10 +326,71 @@ with tab2:
         st.metric("Move vs prior window", f"{delta_pct:+.1f}%")
         st.metric("30-day trend slope", f"{slope:.3f} idx pts/day")
         st.metric("Z-score vs 90-day mean", f"{z:.2f}")
-        st.caption("Weights: cocoa 50% · dairy(milk proxy) 30% · FX 20%, reflecting a chocolate-heavy materials mix. "
-                   "Tickers: " + ", ".join(YF_NAMES.values()) + ".")
+        st.caption("Weights: cocoa 50% · dairy (milk proxy) 30% · FX 20%, reflecting a chocolate-heavy materials mix. "
+                   "Reference sources: " + ", ".join(YF_NAMES.values()) + ".")
     with c2:
         st.plotly_chart(fig, use_container_width=True)
+
+# ===========================================================================
+# MODULE 3 — SUPPLIER RISK AGENT
+# ===========================================================================
+def generate_supplier_risk(seed):
+    rng = np.random.default_rng(seed)
+    suppliers = [
+        ("Cacao Bharat", "Cocoa", "Primary", "Ghana", "CocoaLink India"),
+        ("CocoaLink India", "Cocoa", "Approved alternate", "Cote d'Ivoire", "Cacao Bharat"),
+        ("DairyFresh Co-op", "Milk solids", "Primary", "Maharashtra", "Milko Foods"),
+        ("Milko Foods", "Milk solids", "Approved alternate", "Gujarat", "DairyFresh Co-op"),
+        ("PackRight Films", "Packaging film", "Primary", "Tamil Nadu", "FlexiPack"),
+        ("FlexiPack", "Packaging film", "Approved alternate", "Karnataka", "PackRight Films"),
+    ]
+    rows = []
+    for index, (supplier, material, role, location, alternate) in enumerate(suppliers):
+        delivery = int(rng.integers(3, 38))
+        quality = int(rng.integers(1, 24))
+        financial = int(rng.integers(2, 28))
+        geo = int(rng.integers(1, 30))
+        capacity = int(rng.integers(3, 25))
+        if index == (seed % 3) * 2:
+            delivery = 85
+            geo = 70
+        risk = round(0.35 * delivery + 0.20 * quality + 0.15 * financial + 0.15 * geo + 0.15 * capacity)
+        rows.append({
+            "Supplier": supplier,
+            "Material": material,
+            "Role": role,
+            "Location": location,
+            "Late delivery": delivery,
+            "Quality": quality,
+            "Financial": financial,
+            "Geopolitical": geo,
+            "Capacity": capacity,
+            "Risk score": risk,
+            "Approved alternate": alternate,
+        })
+    return pd.DataFrame(rows)
+
+def supplier_actions(risk_df, cost_signal):
+    actions = []
+    primaries = risk_df[risk_df["Role"] == "Primary"].sort_values("Risk score", ascending=False)
+    for _, supplier in primaries.iterrows():
+        if supplier["Risk score"] >= 35:
+            actions.append({
+                "Priority": "HIGH" if supplier["Risk score"] >= 45 else "MEDIUM",
+                "Material": supplier["Material"],
+                "Decision": f"Qualify {supplier['Approved alternate']} for 30% of next receipts",
+                "Reason": f"{supplier['Supplier']} risk score {supplier['Risk score']}/100",
+            })
+    buying_action = {
+        "BUY NOW": "Advance contracted raw-material buying window by two weeks",
+        "WAIT / HEDGE": "Hold spot exposure; request indexed supplier quotes and hedge review",
+        "NEUTRAL": "Run a competitive RFQ on the normal buying calendar",
+    }[cost_signal]
+    actions.append({
+        "Priority": "MEDIUM", "Material": "Cocoa / dairy / FX",
+        "Decision": buying_action, "Reason": f"Should-cost recommendation: {cost_signal}",
+    })
+    return actions
 
 # ===========================================================================
 # MODULE 3 — CONTROL TOWER + AGENT
@@ -467,6 +531,62 @@ with tab3:
                 st.empty()
             time.sleep(0.5)
         st.rerun()
+
+with tab4:
+    if "supplier_risk_seed" not in st.session_state:
+        st.session_state.supplier_risk_seed = int(np.random.randint(0, 1_000_000_000))
+    if "procurement_execution" not in st.session_state:
+        st.session_state.procurement_execution = []
+
+    risk_df = generate_supplier_risk(st.session_state.supplier_risk_seed)
+    cost_signal = st.session_state.get("procurement_cost_signal", "NEUTRAL")
+    actions = supplier_actions(risk_df, cost_signal)
+    primary_risks = risk_df[risk_df["Role"] == "Primary"]
+    high_risks = primary_risks[primary_risks["Risk score"] >= 35]
+
+    st.write("The procurement agent combines synthetic supplier performance, quality, financial, capacity and "
+             "geopolitical signals with the raw-material should-cost recommendation. It produces only actions "
+             "that use a pre-approved alternate or an established sourcing process.")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Primary suppliers monitored", len(primary_risks))
+    c2.metric("Suppliers needing mitigation", len(high_risks))
+    c3.metric("Current buying guidance", cost_signal)
+
+    refresh_risk = st.button("🔁 Generate new supplier scenario", use_container_width=True, key="refresh_risk")
+    if refresh_risk:
+        st.session_state.supplier_risk_seed = int(np.random.randint(0, 1_000_000_000))
+        st.rerun()
+
+    st.markdown("##### 1. Sense: supplier risk signals")
+    st.dataframe(
+        risk_df[["Supplier", "Material", "Role", "Location", "Late delivery", "Quality", "Financial",
+                 "Geopolitical", "Capacity", "Risk score", "Approved alternate"]],
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption("Risk score combines late-delivery 35%, quality 20%, financial health 15%, geopolitical exposure "
+               "15% and capacity pressure 15%. All supplier records are synthetic.")
+
+    st.markdown("##### 2. Reason: procurement mitigation plan")
+    plan_df = pd.DataFrame(actions)
+    st.dataframe(plan_df, hide_index=True, use_container_width=True)
+
+    execute = st.button("▶ Execute approved mitigation plan", type="primary", use_container_width=True)
+    if execute:
+        for action in actions:
+            st.session_state.procurement_execution.insert(
+                0, f"{action['Priority']}: {action['Material']} - {action['Decision']}"
+            )
+        st.session_state.log.insert(
+            0, ("resolve", f"<b>Procurement agent executed</b> {len(actions)} approved actions: "
+                f"{'; '.join(action['Decision'] for action in actions)}."))
+        st.success("Mitigation plan executed and recorded in the Control Tower event log.")
+
+    if st.session_state.procurement_execution:
+        st.markdown("##### 3. Act and observe: execution record")
+        for entry in st.session_state.procurement_execution[:8]:
+            st.markdown(f"- {entry}")
 
 st.caption("Team Alucard · Maestros 2026 — all data on this page is synthetically generated at runtime. "
            "No real Mondelez operational data is used or required.")
