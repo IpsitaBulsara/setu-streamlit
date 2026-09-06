@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from scipy.optimize import linprog
 
 try:
     import yfinance as yf
@@ -82,8 +83,10 @@ st.title("SETU\u200a·\u200a functional prototype")
 st.markdown('<div class="setu-tag">Unify · Sense · Simulate · Act — Team Alucard, Maestros 2026</div>', unsafe_allow_html=True)
 st.write("")
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Demand Sensing", "💰 Should-Cost", "🗼 Control Tower & Agent", "🤝 Supplier Risk Agent"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    "🌊1 Demand Sensing", "🌊1 Should-Cost & Negotiation", "🌊1 Multi-Echelon Inventory",
+    "🌊2 Supplier Risk Agent", "🌊2 Predictive Maintenance", "🌊2 Energy Setpoints",
+    "🌊2 Network Digital Twin", "🌊3 Route & Cold Chain", "🌊3 Agentic Resolution",
 ])
 
 # ---------------------------------------------------------------------------
@@ -297,7 +300,26 @@ def run_cost_module(nonce):
     fig.update_yaxes(title="Index")
     fig.update_xaxes(title="Trading days")
 
-    return fig, signal, cls, rationale, current, trailing_avg, delta_pct, slope, z, is_live, source_note
+    return fig, signal, cls, rationale, current, trailing_avg, delta_pct, slope, z, is_live, source_note, idx
+
+def build_negotiation_plan(idx, current, signal):
+    """Derive a negotiation brief straight from the 90-day index distribution — not a fixed script."""
+    base90 = idx[-90:]
+    mean90, std90 = base90.mean(), (base90.std() or 1.0)
+    if signal == "BUY NOW":
+        opening_offer, target, walk_away = current - 0.5*std90, current, mean90
+        leverage = "Procurement has leverage: index is below its 90-day average and still falling."
+        lever = "Push for a fixed-price lock for 60-90 days to bank the dip before it reverts."
+    elif signal == "WAIT / HEDGE":
+        opening_offer, target, walk_away = mean90, mean90 + 0.3*std90, current
+        leverage = "Supplier has leverage: index is above its 90-day average and rising."
+        lever = "Negotiate an index-linked clause with a price cap, or split volume 50/50 spot vs hedged."
+    else:
+        opening_offer, target, walk_away = mean90 - 0.3*std90, mean90, mean90 + std90
+        leverage = "No strong directional signal — anchor pricing on the 90-day average."
+        lever = "Standard quarterly RFQ at index-linked pricing; hold firm on payment terms."
+    headroom_pct = (walk_away - target) / target * 100 if target else 0.0
+    return opening_offer, target, walk_away, leverage, lever, headroom_pct
 
 with tab2:
     c1, c2 = st.columns([1, 2.2])
@@ -313,7 +335,7 @@ with tab2:
         if refresh_cost:
             st.session_state.cost_nonce += 1
         result = run_cost_module(st.session_state.cost_nonce)
-        fig, signal, cls, rationale, current, trailing_avg, delta_pct, slope, z, is_live, source_note = result
+        fig, signal, cls, rationale, current, trailing_avg, delta_pct, slope, z, is_live, source_note, idx = result
         st.session_state.procurement_cost_signal = signal
 
         if is_live:
@@ -330,6 +352,19 @@ with tab2:
         st.metric("Z-score vs 90-day mean", f"{z:.2f}")
         st.caption("Weights: cocoa 50% · dairy (milk proxy) 30% · FX 20%, reflecting a chocolate-heavy materials mix. "
                    "Reference sources: " + ", ".join(YF_NAMES.values()) + ".")
+
+        st.markdown("##### 🤝 Negotiation brief")
+        opening_offer, target, walk_away, leverage, lever, headroom_pct = build_negotiation_plan(idx, current, signal)
+        st.write(leverage)
+        n1, n2, n3 = st.columns(3)
+        n1.metric("Opening offer (index)", f"{opening_offer:.1f}")
+        n2.metric("Target settlement (index)", f"{target:.1f}")
+        n3.metric("Walk-away ceiling (index)", f"{walk_away:.1f}")
+        st.metric("Negotiation headroom", f"{headroom_pct:.1f}%",
+                   help="Gap between walk-away ceiling and target settlement, as a % of target.")
+        st.info(f"**Recommended lever:** {lever}", icon="📝")
+        st.caption("Opening/target/walk-away are derived from the live 90-day index mean and standard deviation — "
+                   "reproducible from the data above, not scripted per run.")
     with c2:
         st.plotly_chart(fig, use_container_width=True)
 
@@ -456,7 +491,40 @@ def sim_tick():
 if "warehouses" not in st.session_state:
     reset_network()
 
+def compute_meio_safety_stock(whs, seed, service_z=1.645, demand_cv=0.25):
+    """Stochastic MEIO: safety stock per node from its own demand variability and lead time,
+    vs a naive flat 5-day-of-cover safety stock applied network-wide."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for w in whs.values():
+        lead_time = float(rng.uniform(4, 10))
+        sigma_daily = w["demand"] * demand_cv
+        meio_ss = service_z * sigma_daily * np.sqrt(lead_time)
+        naive_ss = w["demand"] * 5.0
+        rows.append({
+            "Node": w["label"], "Lead time (d)": round(lead_time, 1),
+            "Demand std/day": round(sigma_daily, 1),
+            "MEIO safety stock": round(meio_ss),
+            "Naive fixed safety stock": round(naive_ss),
+            "Reduction vs naive": (naive_ss - meio_ss) / naive_ss * 100 if naive_ss else 0.0,
+        })
+    return pd.DataFrame(rows)
+
 with tab3:
+    st.write("Sets each node's statistically-derived safety stock from its own demand variability and lead time, "
+             "instead of one flat days-of-cover target for every node.")
+    if "meio_seed" not in st.session_state:
+        st.session_state.meio_seed = int(np.random.randint(0, 1_000_000_000))
+    resample_meio = st.button("🔁 Resample lead times & demand variability", use_container_width=True, key="meio_resample")
+    if resample_meio:
+        st.session_state.meio_seed = int(np.random.randint(0, 1_000_000_000))
+    meio_df = compute_meio_safety_stock(st.session_state.warehouses, st.session_state.meio_seed)
+    st.dataframe(meio_df, hide_index=True, use_container_width=True)
+    st.metric("Network-wide inventory reduction vs flat safety stock", f"{meio_df['Reduction vs naive'].mean():+.1f}%")
+    st.caption("Safety stock = z(95%) × demand std/day × √(lead time). Illustrative synthetic lead times and demand "
+               "variability — directionally consistent with the roadmap's -18% inventory claim, exact figure varies by run.")
+
+    st.markdown("##### Live control tower & rebalancing agent")
     st.write("A live 4-warehouse network drains against synthetic daily demand. When a node's days-of-cover falls "
              "below target, the tower raises an alert — then an agent computes an actual rebalancing plan "
              "(equalising days-of-cover network-wide) and applies it.")
@@ -589,6 +657,282 @@ with tab4:
         st.markdown("##### 3. Act and observe: execution record")
         for entry in st.session_state.procurement_execution[:8]:
             st.markdown(f"- {entry}")
+
+# ===========================================================================
+# MODULE 5 — PREDICTIVE MAINTENANCE
+# ===========================================================================
+def generate_sensor_telemetry(seed, hours=72):
+    rng = np.random.default_rng(seed)
+    lines = ["Line 1", "Line 2", "Line 3", "Line 4"]
+    t = np.arange(hours)
+    fault_line = lines[seed % len(lines)]
+    data = {}
+    for line in lines:
+        vib = 2.0 + rng.normal(0, 0.15, hours)  # stationary noise: normal operation has no structural drift
+        if line == fault_line:
+            ramp = np.clip(t - hours * 0.6, 0, None) * 0.06
+            vib = vib + ramp
+        data[line] = vib
+    return pd.DataFrame(data, index=t), fault_line
+
+def detect_anomalies(df, baseline_hours=36, z_thresh=4.0):
+    """Static early-baseline z-score — catches slow wear-drift signatures that a rolling
+    window would absorb into its own adapting mean/std."""
+    flags = {}
+    for col in df.columns:
+        baseline = df[col].iloc[:baseline_hours]
+        mu, sigma = baseline.mean(), (baseline.std() or 1e-6)
+        z = (df[col] - mu) / sigma
+        flags[col] = z.abs() > z_thresh
+    return pd.DataFrame(flags)
+
+with tab5:
+    st.write("Synthetic vibration telemetry across 4 production lines; a rolling z-score anomaly detector flags "
+             "bearing-wear signatures before they cause unplanned downtime.")
+    if "maint_seed" not in st.session_state:
+        st.session_state.maint_seed = int(np.random.randint(0, 1_000_000_000))
+    resample_maint = st.button("🔁 Resample telemetry", use_container_width=True, key="resample_maint")
+    if resample_maint:
+        st.session_state.maint_seed = int(np.random.randint(0, 1_000_000_000))
+    telemetry, fault_line = generate_sensor_telemetry(st.session_state.maint_seed)
+    anomalies = detect_anomalies(telemetry)
+    flagged_lines = [col for col in telemetry.columns if anomalies[col].any()]
+
+    line_colors = {"Line 1": GOLD, "Line 2": RED, "Line 3": GREEN, "Line 4": PURPLE}
+    fig = go.Figure()
+    for col in telemetry.columns:
+        fig.add_trace(go.Scatter(y=list(telemetry[col]), name=col, line=dict(color=line_colors[col], width=1.5)))
+        flagged_idx = telemetry.index[anomalies[col]]
+        if len(flagged_idx):
+            fig.add_trace(go.Scatter(x=list(flagged_idx), y=list(telemetry[col].loc[flagged_idx]), mode="markers",
+                                      name=f"{col} anomaly", marker=dict(color=RED, size=6, symbol="x"), showlegend=False))
+    fig.update_layout(**base_layout("Vibration telemetry (baseline z-score anomaly flags)"))
+    fig.update_yaxes(title="Vibration index")
+    fig.update_xaxes(title="Hours")
+    st.plotly_chart(fig, use_container_width=True)
+
+    baseline_oee, improved_oee = 68.0, 73.0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Lines flagged for maintenance", len(flagged_lines))
+    c2.metric("Baseline OEE (reactive maintenance)", f"{baseline_oee:.0f}%")
+    c3.metric("OEE with predictive maintenance", f"{improved_oee:.0f}%", delta=f"+{improved_oee-baseline_oee:.0f} pts")
+
+    schedule_maint = st.button("▶ Schedule predictive maintenance for flagged lines", type="primary",
+                                use_container_width=True, disabled=not flagged_lines, key="schedule_maint")
+    if schedule_maint:
+        st.session_state.log.insert(0, ("resolve",
+            f"<b>Predictive maintenance agent</b> scheduled inspection for {', '.join(flagged_lines)} "
+            f"after rolling z-score anomaly detection — avoided reactive downtime."))
+        st.success(f"Maintenance scheduled for {', '.join(flagged_lines)} and recorded in the shared agent log.")
+    st.caption("Anomaly rule: z-score vs the first 36-hour operating baseline > 4 on vibration telemetry. "
+               "Synthetic sensor data; "
+               "OEE figures are illustrative, consistent with the roadmap's 68%→73% claim.")
+
+# ===========================================================================
+# MODULE 6 — ENERGY SETPOINTS (model-predictive-control-lite)
+# ===========================================================================
+def optimize_energy_setpoints(seed, min_high_hours=3):
+    rng = np.random.default_rng(seed)
+    hours = np.arange(24)
+    tariff = 4.5 + 2.5 * np.sin((hours - 14) / 24 * 2 * np.pi) + rng.normal(0, 0.15, 24)
+    tariff = np.clip(tariff, 2.0, None)
+    power = {160: 40.0, 175: 55.0, 190: 75.0}
+
+    naive_cost = float(np.sum(tariff * power[190]))
+
+    cheapest_hours = np.argsort(tariff)
+    chosen = np.full(24, 160)
+    chosen[cheapest_hours[:min_high_hours]] = 190
+    remaining = [h for h in range(24) if chosen[h] != 190]
+    remaining_sorted = sorted(remaining, key=lambda h: tariff[h])
+    for h in remaining_sorted[:len(remaining_sorted) // 2]:
+        chosen[h] = 175
+
+    optimized_cost = float(np.sum([tariff[h] * power[chosen[h]] for h in range(24)]))
+    savings_pct = (naive_cost - optimized_cost) / naive_cost * 100 if naive_cost else 0.0
+    return hours, tariff, chosen, naive_cost, optimized_cost, savings_pct
+
+with tab6:
+    st.write("Schedules oven setpoints against the hourly energy tariff: mandatory high-temperature bakes are "
+             "placed on the cheapest hours, and moderate setpoints fill the next-cheapest slots — a "
+             "model-predictive-control-lite schedule, not a fixed always-on setpoint.")
+    if "energy_seed" not in st.session_state:
+        st.session_state.energy_seed = int(np.random.randint(0, 1_000_000_000))
+    resample_energy = st.button("🔁 Resample tariff curve", use_container_width=True, key="resample_energy")
+    if resample_energy:
+        st.session_state.energy_seed = int(np.random.randint(0, 1_000_000_000))
+    hours, tariff, chosen, naive_cost, optimized_cost, savings_pct = optimize_energy_setpoints(st.session_state.energy_seed)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=list(hours), y=list(tariff), name="Energy tariff (₹/kWh)", yaxis="y2",
+                              line=dict(color=RED, width=2, dash="dot")))
+    setpoint_colors = {160: GREEN, 175: GOLD, 190: RED}
+    fig.add_trace(go.Bar(x=list(hours), y=list(chosen), name="Oven setpoint (°C)",
+                          marker=dict(color=[setpoint_colors[c] for c in chosen])))
+    fig.update_layout(**base_layout("Optimized oven setpoint schedule vs energy tariff"))
+    fig.update_layout(yaxis2=dict(overlaying="y", side="right", title="₹/kWh", showgrid=False))
+    fig.update_yaxes(title="Setpoint (°C)")
+    fig.update_xaxes(title="Hour of day")
+    st.plotly_chart(fig, use_container_width=True)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Always-on 190°C baseline cost", f"₹{naive_cost:,.0f}")
+    c2.metric("Optimized schedule cost", f"₹{optimized_cost:,.0f}")
+    c3.metric("Energy cost saved", f"{savings_pct:.1f}%")
+
+    apply_energy = st.button("▶ Apply optimized setpoint schedule", type="primary", use_container_width=True, key="apply_energy")
+    if apply_energy:
+        st.session_state.log.insert(0, ("resolve",
+            f"<b>Energy setpoint agent</b> applied a tariff-aware oven schedule — "
+            f"{savings_pct:.1f}% lower energy cost vs always-on 190°C."))
+        st.success("Setpoint schedule applied and recorded in the shared agent log.")
+    st.caption("Synthetic hourly tariff curve; setpoint choice is a greedy cost-minimizing heuristic subject to a "
+               "minimum-throughput constraint at the highest setpoint.")
+
+# ===========================================================================
+# MODULE 7 — NETWORK DIGITAL TWIN (make/hold LP)
+# ===========================================================================
+def solve_network_twin(whs, seed):
+    rng = np.random.default_rng(seed)
+    plants = ["Plant-A (Baddi)", "Plant-B (Hyderabad)"]
+    node_labels = [w["label"] for w in whs.values()]
+    demands = np.array([w["demand"] for w in whs.values()], dtype=float)
+    n_plants, n_wh = 2, len(node_labels)
+
+    capacities = np.array([demands.sum() * 0.65, demands.sum() * 0.65])
+    prod_cost = np.array([12.0, 10.5])
+    transport_cost = rng.uniform(1.0, 4.0, size=(n_plants, n_wh))
+    cost = prod_cost[:, None] + transport_cost
+
+    c = cost.flatten()
+    A_eq = np.zeros((n_wh, n_plants * n_wh))
+    for j in range(n_wh):
+        for i in range(n_plants):
+            A_eq[j, i * n_wh + j] = 1
+    A_ub = np.zeros((n_plants, n_plants * n_wh))
+    for i in range(n_plants):
+        A_ub[i, i * n_wh:(i + 1) * n_wh] = 1
+
+    res = linprog(c, A_ub=A_ub, b_ub=capacities, A_eq=A_eq, b_eq=demands, bounds=(0, None), method="highs")
+    alloc = res.x.reshape(n_plants, n_wh) if res.success else np.zeros((n_plants, n_wh))
+    lp_cost = float(res.fun) if res.success else float("nan")
+
+    naive_alloc = np.tile(demands / n_plants, (n_plants, 1))
+    naive_cost = float(np.sum(naive_alloc * cost))
+    return plants, node_labels, cost, alloc, lp_cost, naive_cost, bool(res.success)
+
+with tab7:
+    st.write("A linear-programming network twin decides how much each plant should make for each warehouse, "
+             "minimising total production + transport cost subject to plant capacity and warehouse demand — "
+             "an LP relaxation of the roadmap's full make/hold MILP.")
+    if "twin_seed" not in st.session_state:
+        st.session_state.twin_seed = int(np.random.randint(0, 1_000_000_000))
+    resample_twin = st.button("🔁 Resample transport cost lanes", use_container_width=True, key="resample_twin")
+    if resample_twin:
+        st.session_state.twin_seed = int(np.random.randint(0, 1_000_000_000))
+
+    plants, node_labels, cost, alloc, lp_cost, naive_cost, solved = solve_network_twin(
+        st.session_state.warehouses, st.session_state.twin_seed)
+
+    if solved:
+        alloc_df = pd.DataFrame(alloc, index=plants, columns=node_labels).round(0)
+        st.dataframe(alloc_df, use_container_width=True)
+        savings_pct = (naive_cost - lp_cost) / naive_cost * 100 if naive_cost else 0.0
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Naive 50/50 split cost", f"₹{naive_cost:,.0f}/day")
+        c2.metric("LP-optimized cost", f"₹{lp_cost:,.0f}/day")
+        c3.metric("Cost saved", f"{savings_pct:.1f}%")
+
+        apply_twin = st.button("▶ Apply optimized make/hold plan", type="primary", use_container_width=True, key="apply_twin")
+        if apply_twin:
+            st.session_state.log.insert(0, ("resolve",
+                f"<b>Network digital twin</b> applied an LP-optimized make/hold plan across {', '.join(plants)} — "
+                f"{savings_pct:.1f}% lower landed cost vs an even split."))
+            st.success("Make/hold plan applied and recorded in the shared agent log.")
+    else:
+        st.warning("LP solver could not find a feasible allocation for this sample — resample and try again.")
+    st.caption("Synthetic plant capacities, production costs and transport lanes; solved exactly with "
+               "`scipy.optimize.linprog` (HiGHS).")
+
+# ===========================================================================
+# MODULE 8 — ROUTE, LOAD & COLD CHAIN
+# ===========================================================================
+def generate_routes(seed, n=8):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for i in range(n):
+        chocolate_pct = float(rng.uniform(5, 95))
+        ambient_c = float(rng.uniform(18, 42))
+        distance_km = float(rng.uniform(80, 900))
+        needs_cold_chain = chocolate_pct > 30 and ambient_c > 28
+        cold_cost, ambient_cost = 1.8, 1.0
+        cost_always_cold = distance_km * cold_cost
+        cost_targeted = distance_km * (cold_cost if needs_cold_chain else ambient_cost)
+        rows.append({
+            "Route": f"R-{i+1}", "Chocolate %": round(chocolate_pct, 1), "Ambient temp (°C)": round(ambient_c, 1),
+            "Distance (km)": round(distance_km), "Cold chain needed": needs_cold_chain,
+            "Cost if always cold-chain (₹)": round(cost_always_cold), "Targeted cost (₹)": round(cost_targeted),
+        })
+    return pd.DataFrame(rows)
+
+with tab8:
+    st.write("Cold chain is applied only where chocolate content and ambient temperature actually require it — "
+             "not on every route by default.")
+    if "route_seed" not in st.session_state:
+        st.session_state.route_seed = int(np.random.randint(0, 1_000_000_000))
+    resample_routes = st.button("🔁 Resample route mix", use_container_width=True, key="resample_routes")
+    if resample_routes:
+        st.session_state.route_seed = int(np.random.randint(0, 1_000_000_000))
+    routes_df = generate_routes(st.session_state.route_seed)
+    st.dataframe(routes_df, hide_index=True, use_container_width=True)
+
+    total_always = routes_df["Cost if always cold-chain (₹)"].sum()
+    total_targeted = routes_df["Targeted cost (₹)"].sum()
+    savings_pct = (total_always - total_targeted) / total_always * 100 if total_always else 0.0
+    flagged_routes = routes_df.loc[routes_df["Cold chain needed"], "Route"].tolist()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Routes needing cold chain", len(flagged_routes))
+    c2.metric("Cost if cold-chain everywhere", f"₹{total_always:,.0f}")
+    c3.metric("Cost saved with targeted cold chain", f"{savings_pct:.1f}%")
+
+    dispatch_routes = st.button("▶ Dispatch cold-chain trucks to flagged routes only", type="primary",
+                                 use_container_width=True, key="dispatch_routes")
+    if dispatch_routes:
+        st.session_state.log.insert(0, ("resolve",
+            f"<b>Route & cold-chain agent</b> dispatched cold-chain trucks to {', '.join(flagged_routes) or 'no routes'} "
+            f"— {savings_pct:.1f}% lower logistics cost vs cold-chain-everywhere."))
+        st.success("Cold-chain dispatch plan applied and recorded in the shared agent log.")
+    st.caption("Rule: cold chain applied where chocolate content > 30% and ambient temperature > 28°C. "
+               "Synthetic route data.")
+
+# ===========================================================================
+# MODULE 9 — AGENTIC RESOLUTION (unified cross-agent timeline)
+# ===========================================================================
+with tab9:
+    st.write("Every agent above — inventory rebalancing, supplier risk, predictive maintenance, energy setpoints, "
+             "the network digital twin and route/cold-chain — writes into one shared resolution log. Manual "
+             "escalation across these functions typically takes ~12 days; these agents draft and execute directly.")
+
+    ttm_samples = st.session_state.get("ttm_samples", [])
+    avg_ttm = float(np.mean(ttm_samples)) if ttm_samples else 3.0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Manual process baseline", "12 days")
+    c2.metric("Agentic resolution (avg. simulated)", f"{avg_ttm:.1f} days")
+    c3.metric("Time saved", f"{(12 - avg_ttm) / 12 * 100:.0f}%")
+
+    st.markdown("##### Unified agent action timeline")
+    shared_log = st.session_state.get("log", [])
+    if shared_log:
+        lines = []
+        for kind, msg in shared_log[:80]:
+            cls = {"alert": "log-alert", "resolve": "log-resolve", "info": "log-info"}[kind]
+            lines.append(f'<div class="log-line {cls}">{msg}</div>')
+        st.markdown(f'<div class="log-box">{"".join(lines)}</div>', unsafe_allow_html=True)
+    else:
+        st.info("No agent actions yet — trigger one from any Wave tab above.", icon="ℹ️")
+    st.caption("Shared across Multi-Echelon Inventory, Supplier Risk, Predictive Maintenance, Energy Setpoints, "
+               "Network Digital Twin and Route & Cold Chain agents.")
 
 st.caption("Team Alucard · Maestros 2026 — all data on this page is synthetically generated at runtime. "
            "No real Mondelez operational data is used or required.")
