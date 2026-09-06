@@ -358,7 +358,7 @@ def agent_resolve(trigger_label):
         target = round(w["demand"] * network_cover)
         delta = target - w["stock"]
         if abs(delta) >= 1:
-            moves.append(f"{w['label']} {delta:+d}")
+            moves.append(f"{w['label']} {delta:+.0f}")
         w["stock"] = target
     simulated_ttm = round(float(np.random.uniform(1.5, 3.3)), 1)
     st.session_state.ttm_samples.append(simulated_ttm)
